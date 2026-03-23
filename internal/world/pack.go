@@ -2,51 +2,14 @@ package world
 
 import (
 	"database/sql"
-	"encoding/binary"
-	"encoding/xml"
 	"flag"
 	"fmt"
-	"os"
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/codefatherllc/wypas-lib/otbm"
+	"github.com/codefatherllc/wypas-lib/gamedata"
+	"github.com/codefatherllc/wypas-lib/otb"
 )
-
-type xmlSpawns struct {
-	Spawns []xmlSpawn `xml:"spawn"`
-}
-
-type xmlSpawn struct {
-	CenterX  uint16       `xml:"centerx,attr"`
-	CenterY  uint16       `xml:"centery,attr"`
-	CenterZ  uint8        `xml:"centerz,attr"`
-	Radius   int32        `xml:"radius,attr"`
-	Monsters []xmlMonster `xml:"monster"`
-}
-
-type xmlMonster struct {
-	Name      string `xml:"name,attr"`
-	X         int16  `xml:"x,attr"`
-	Y         int16  `xml:"y,attr"`
-	SpawnTime int32  `xml:"spawntime,attr"`
-	Direction uint8  `xml:"direction,attr"`
-}
-
-type xmlHouses struct {
-	Houses []xmlHouse `xml:"house"`
-}
-
-type xmlHouse struct {
-	ID     uint32 `xml:"houseid,attr"`
-	Name   string `xml:"name,attr"`
-	EntryX uint16 `xml:"entryx,attr"`
-	EntryY uint16 `xml:"entryy,attr"`
-	EntryZ uint8  `xml:"entryz,attr"`
-	Rent   int32  `xml:"rent,attr"`
-	TownID int32  `xml:"townid,attr"`
-	Size   int32  `xml:"size,attr"`
-}
 
 func Seed(args []string) error {
 	fs := flag.NewFlagSet("map seed", flag.ExitOnError)
@@ -61,35 +24,17 @@ func Seed(args []string) error {
 		return fmt.Errorf("--otbm and --dsn are required")
 	}
 
-	gm, err := otbm.ParseOTBM(*otbmPath)
-	if err != nil {
-		return fmt.Errorf("parse otbm: %w", err)
-	}
-
-	var spawns []xmlSpawn
+	var opts []otb.WorldOption
 	if *spawnsPath != "" {
-		data, err := os.ReadFile(*spawnsPath)
-		if err != nil {
-			return fmt.Errorf("read spawns: %w", err)
-		}
-		var xs xmlSpawns
-		if err := xml.Unmarshal(data, &xs); err != nil {
-			return fmt.Errorf("parse spawns: %w", err)
-		}
-		spawns = xs.Spawns
+		opts = append(opts, otb.WithSpawns(*spawnsPath))
+	}
+	if *housesPath != "" {
+		opts = append(opts, otb.WithHouses(*housesPath))
 	}
 
-	var houses []xmlHouse
-	if *housesPath != "" {
-		data, err := os.ReadFile(*housesPath)
-		if err != nil {
-			return fmt.Errorf("read houses: %w", err)
-		}
-		var xh xmlHouses
-		if err := xml.Unmarshal(data, &xh); err != nil {
-			return fmt.Errorf("parse houses: %w", err)
-		}
-		houses = xh.Houses
+	world, err := otb.LoadWorld(*otbmPath, opts...)
+	if err != nil {
+		return fmt.Errorf("load world: %w", err)
 	}
 
 	db, err := sql.Open("mysql", *dsn)
@@ -102,27 +47,27 @@ func Seed(args []string) error {
 		return fmt.Errorf("ping db: %w", err)
 	}
 
-	tileCount, err := seedTiles(db, gm)
+	tileCount, err := seedTiles(db, world.Tiles)
 	if err != nil {
 		return fmt.Errorf("seed tiles: %w", err)
 	}
 
-	spawnCount, err := seedSpawns(db, spawns)
+	spawnCount, err := seedSpawns(db, world.Spawns)
 	if err != nil {
 		return fmt.Errorf("seed spawns: %w", err)
 	}
 
-	houseCount, err := seedHouses(db, houses)
+	houseCount, err := seedHouses(db, world.Houses)
 	if err != nil {
 		return fmt.Errorf("seed houses: %w", err)
 	}
 
-	townCount, err := seedTowns(db, gm.Towns)
+	townCount, err := seedTowns(db, world.Towns)
 	if err != nil {
 		return fmt.Errorf("seed towns: %w", err)
 	}
 
-	wpCount, err := seedWaypoints(db, gm.Waypoints)
+	wpCount, err := seedWaypoints(db, world.Waypoints)
 	if err != nil {
 		return fmt.Errorf("seed waypoints: %w", err)
 	}
@@ -132,7 +77,7 @@ func Seed(args []string) error {
 	return nil
 }
 
-func seedTiles(db *sql.DB, gm *otbm.GameMap) (int, error) {
+func seedTiles(db *sql.DB, tiles []gamedata.MapTile) (int, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -143,43 +88,18 @@ func seedTiles(db *sql.DB, gm *otbm.GameMap) (int, error) {
 		return 0, err
 	}
 
-	stmt, err := tx.Prepare("INSERT INTO map_tiles (x, y, z, ground_id, flags, house_id, items) VALUES (?, ?, ?, ?, ?, ?, ?)")
-	if err != nil {
+	if err := gamedata.BulkInsertTiles(tx, tiles); err != nil {
 		return 0, err
 	}
-	defer stmt.Close()
 
-	count := 0
-	for key, tile := range gm.Tiles {
-		x := uint16(key >> 24)
-		y := uint16((key >> 8) & 0xFFFF)
-		z := uint8(key & 0xFF)
-
-		var groundID uint16
-		items := tile.Items
-		if len(items) > 0 {
-			groundID = items[0]
-			items = items[1:]
-		}
-
-		var blob []byte
-		if len(items) > 0 {
-			blob = make([]byte, len(items)*2)
-			for i, id := range items {
-				binary.LittleEndian.PutUint16(blob[i*2:], id)
-			}
-		}
-
-		if _, err := stmt.Exec(x, y, z, groundID, tile.Flags, tile.HouseID, blob); err != nil {
-			return 0, fmt.Errorf("tile %d,%d,%d: %w", x, y, z, err)
-		}
-		count++
-	}
-
-	return count, tx.Commit()
+	return len(tiles), tx.Commit()
 }
 
-func seedSpawns(db *sql.DB, spawns []xmlSpawn) (int, error) {
+func seedSpawns(db *sql.DB, spawns []gamedata.Spawn) (int, error) {
+	if len(spawns) == 0 {
+		return 0, nil
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -199,7 +119,7 @@ func seedSpawns(db *sql.DB, spawns []xmlSpawn) (int, error) {
 	}
 	defer spawnStmt.Close()
 
-	entryStmt, err := tx.Prepare("INSERT INTO map_spawn_entries (spawn_id, name, offset_x, offset_y, spawntime) VALUES (?, ?, ?, ?, ?)")
+	entryStmt, err := tx.Prepare("INSERT INTO map_spawn_entries (spawn_id, name, type, offset_x, offset_y, offset_z, spawntime) VALUES (?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return 0, err
 	}
@@ -211,8 +131,8 @@ func seedSpawns(db *sql.DB, spawns []xmlSpawn) (int, error) {
 			return 0, err
 		}
 		spawnID, _ := res.LastInsertId()
-		for _, m := range s.Monsters {
-			if _, err := entryStmt.Exec(spawnID, m.Name, m.X, m.Y, m.SpawnTime); err != nil {
+		for _, c := range s.Creatures {
+			if _, err := entryStmt.Exec(spawnID, c.Name, c.Type, c.OffsetX, c.OffsetY, c.OffsetZ, c.SpawnTime); err != nil {
 				return 0, err
 			}
 		}
@@ -221,7 +141,11 @@ func seedSpawns(db *sql.DB, spawns []xmlSpawn) (int, error) {
 	return len(spawns), tx.Commit()
 }
 
-func seedHouses(db *sql.DB, houses []xmlHouse) (int, error) {
+func seedHouses(db *sql.DB, houses []gamedata.House) (int, error) {
+	if len(houses) == 0 {
+		return 0, nil
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -247,7 +171,11 @@ func seedHouses(db *sql.DB, houses []xmlHouse) (int, error) {
 	return len(houses), tx.Commit()
 }
 
-func seedTowns(db *sql.DB, towns []otbm.Town) (int, error) {
+func seedTowns(db *sql.DB, towns []gamedata.Town) (int, error) {
+	if len(towns) == 0 {
+		return 0, nil
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
@@ -265,7 +193,7 @@ func seedTowns(db *sql.DB, towns []otbm.Town) (int, error) {
 	defer stmt.Close()
 
 	for _, t := range towns {
-		if _, err := stmt.Exec(t.ID, t.Name, t.X, t.Y, t.Z); err != nil {
+		if _, err := stmt.Exec(t.ID, t.Name, t.EntryX, t.EntryY, t.EntryZ); err != nil {
 			return 0, err
 		}
 	}
@@ -273,7 +201,11 @@ func seedTowns(db *sql.DB, towns []otbm.Town) (int, error) {
 	return len(towns), tx.Commit()
 }
 
-func seedWaypoints(db *sql.DB, waypoints []otbm.Waypoint) (int, error) {
+func seedWaypoints(db *sql.DB, waypoints []gamedata.Waypoint) (int, error) {
+	if len(waypoints) == 0 {
+		return 0, nil
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
