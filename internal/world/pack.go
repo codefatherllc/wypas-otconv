@@ -138,9 +138,7 @@ func buildWorldMap(gm *otbm.GameMap, spawns []xmlSpawn, houses []xmlHouse) *libo
 			HouseID: tile.HouseID,
 		}
 
-		for _, itemID := range tile.Items {
-			t.Items = append(t.Items, libotw.MapItem{ServerID: itemID})
-		}
+		t.Items = append(t.Items, tile.Items...)
 		for _, ri := range tile.RichItems {
 			mi := libotw.MapItem{
 				ServerID:    ri.ID,
@@ -159,7 +157,7 @@ func buildWorldMap(gm *otbm.GameMap, spawns []xmlSpawn, houses []xmlHouse) *libo
 				mi.TeleDestY = ri.TeleDest.Y
 				mi.TeleDestZ = ri.TeleDest.Z
 			}
-			t.Items = append(t.Items, mi)
+			t.RichItems = append(t.RichItems, mi)
 		}
 
 		area.Tiles = append(area.Tiles, t)
