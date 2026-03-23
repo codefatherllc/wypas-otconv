@@ -2,13 +2,11 @@ module github.com/codefatherllc/wypas-otconv
 
 go 1.22.3
 
-require github.com/codefatherllc/wypas-lib v0.0.0
-
 require (
-	github.com/codefatherllc/wypas-proto v0.0.0 // indirect
-	github.com/google/flatbuffers v25.2.10+incompatible // indirect
+	github.com/codefatherllc/wypas-lib v0.0.0
+	github.com/go-sql-driver/mysql v1.8.1
 )
 
-replace github.com/codefatherllc/wypas-lib => ../wypas-lib
+require filippo.io/edwards25519 v1.1.0 // indirect
 
-replace github.com/codefatherllc/wypas-proto => ../wypas-proto
+replace github.com/codefatherllc/wypas-lib => ../wypas-lib

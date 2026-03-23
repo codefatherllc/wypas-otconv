@@ -1,13 +1,16 @@
 package world
 
 import (
+	"database/sql"
+	"encoding/binary"
 	"encoding/xml"
 	"flag"
 	"fmt"
 	"os"
 
+	_ "github.com/go-sql-driver/mysql"
+
 	"github.com/codefatherllc/wypas-lib/otbm"
-	libotw "github.com/codefatherllc/wypas-lib/otw"
 )
 
 type xmlSpawns struct {
@@ -45,17 +48,17 @@ type xmlHouse struct {
 	Size   int32  `xml:"size,attr"`
 }
 
-func Pack(args []string) error {
-	fs := flag.NewFlagSet("map pack", flag.ExitOnError)
+func Seed(args []string) error {
+	fs := flag.NewFlagSet("map seed", flag.ExitOnError)
 	otbmPath := fs.String("otbm", "", "path to Map.otbm")
-	spawnsPath := fs.String("spawns", "", "path to spawns.xml (optional)")
-	housesPath := fs.String("houses", "", "path to houses.xml (optional)")
-	outPath := fs.String("o", "", "output .otw file")
+	spawnsPath := fs.String("spawns", "", "path to spawns.xml")
+	housesPath := fs.String("houses", "", "path to houses.xml")
+	dsn := fs.String("dsn", "", "database DSN")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *otbmPath == "" || *outPath == "" {
-		return fmt.Errorf("--otbm and -o are required")
+	if *otbmPath == "" || *dsn == "" {
+		return fmt.Errorf("--otbm and --dsn are required")
 	}
 
 	gm, err := otbm.ParseOTBM(*otbmPath)
@@ -89,134 +92,209 @@ func Pack(args []string) error {
 		houses = xh.Houses
 	}
 
-	wm := buildWorldMap(gm, spawns, houses)
+	db, err := sql.Open("mysql", *dsn)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
 
-	if err := libotw.WriteFile(*outPath, wm); err != nil {
-		return fmt.Errorf("write otw: %w", err)
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("ping db: %w", err)
 	}
 
-	totalTiles := 0
-	for _, ta := range wm.TileAreas {
-		totalTiles += len(ta.Tiles)
+	tileCount, err := seedTiles(db, gm)
+	if err != nil {
+		return fmt.Errorf("seed tiles: %w", err)
 	}
-	fi, _ := os.Stat(*outPath)
-	fmt.Printf("packed %d tiles, %d spawns, %d houses → %s (%d bytes)\n",
-		totalTiles, len(wm.Spawns), len(wm.Houses), *outPath, fi.Size())
+
+	spawnCount, err := seedSpawns(db, spawns)
+	if err != nil {
+		return fmt.Errorf("seed spawns: %w", err)
+	}
+
+	houseCount, err := seedHouses(db, houses)
+	if err != nil {
+		return fmt.Errorf("seed houses: %w", err)
+	}
+
+	townCount, err := seedTowns(db, gm.Towns)
+	if err != nil {
+		return fmt.Errorf("seed towns: %w", err)
+	}
+
+	wpCount, err := seedWaypoints(db, gm.Waypoints)
+	if err != nil {
+		return fmt.Errorf("seed waypoints: %w", err)
+	}
+
+	fmt.Printf("seeded: %d tiles, %d spawns, %d houses, %d towns, %d waypoints\n",
+		tileCount, spawnCount, houseCount, townCount, wpCount)
 	return nil
 }
 
-type areaKey struct {
-	x, y uint16
-	z    uint8
-}
+func seedTiles(db *sql.DB, gm *otbm.GameMap) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 
-func buildWorldMap(gm *otbm.GameMap, spawns []xmlSpawn, houses []xmlHouse) *libotw.WorldMap {
-	wm := &libotw.WorldMap{
-		Version: 1,
-		Width:   gm.MaxX - gm.MinX,
-		Height:  gm.MaxY - gm.MinY,
+	if _, err := tx.Exec("DELETE FROM map_tiles"); err != nil {
+		return 0, err
 	}
 
-	areas := make(map[areaKey]*libotw.TileArea)
+	stmt, err := tx.Prepare("INSERT INTO map_tiles (x, y, z, ground_id, flags, house_id, items) VALUES (?, ?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
 
+	count := 0
 	for key, tile := range gm.Tiles {
 		x := uint16(key >> 24)
 		y := uint16((key >> 8) & 0xFFFF)
 		z := uint8(key & 0xFF)
 
-		ak := areaKey{x: x & 0xFF00, y: y & 0xFF00, z: z}
-		area, ok := areas[ak]
-		if !ok {
-			area = &libotw.TileArea{BaseX: ak.x, BaseY: ak.y, BaseZ: z}
-			areas[ak] = area
+		var groundID uint16
+		items := tile.Items
+		if len(items) > 0 {
+			groundID = items[0]
+			items = items[1:]
 		}
 
-		t := libotw.Tile{
-			OffsetX: uint8(x & 0xFF),
-			OffsetY: uint8(y & 0xFF),
-			Flags:   tile.Flags,
-			HouseID: tile.HouseID,
-		}
-
-		t.Items = append(t.Items, tile.Items...)
-		for _, ri := range tile.RichItems {
-			mi := libotw.MapItem{
-				ServerID:    ri.ID,
-				ActionID:    ri.ActionID,
-				UniqueID:    ri.UniqueID,
-				DoorID:      ri.DoorID,
-				DepotID:     ri.DepotID,
-				Text:        ri.Text,
-				Description: ri.Description,
-				Charges:     ri.Charges,
-				RuneCharges: ri.RuneCharges,
-				Count:       ri.Count,
+		var blob []byte
+		if len(items) > 0 {
+			blob = make([]byte, len(items)*2)
+			for i, id := range items {
+				binary.LittleEndian.PutUint16(blob[i*2:], id)
 			}
-			if ri.TeleDest != nil {
-				mi.TeleDestX = ri.TeleDest.X
-				mi.TeleDestY = ri.TeleDest.Y
-				mi.TeleDestZ = ri.TeleDest.Z
-			}
-			t.RichItems = append(t.RichItems, mi)
 		}
 
-		area.Tiles = append(area.Tiles, t)
+		if _, err := stmt.Exec(x, y, z, groundID, tile.Flags, tile.HouseID, blob); err != nil {
+			return 0, fmt.Errorf("tile %d,%d,%d: %w", x, y, z, err)
+		}
+		count++
 	}
 
-	for _, area := range areas {
-		wm.TileAreas = append(wm.TileAreas, *area)
+	return count, tx.Commit()
+}
+
+func seedSpawns(db *sql.DB, spawns []xmlSpawn) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM map_spawn_entries"); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec("DELETE FROM map_spawns"); err != nil {
+		return 0, err
 	}
 
-	for _, t := range gm.Towns {
-		wm.Towns = append(wm.Towns, libotw.Town{
-			ID:      t.ID,
-			Name:    t.Name,
-			TempleX: t.X,
-			TempleY: t.Y,
-			TempleZ: t.Z,
-		})
+	spawnStmt, err := tx.Prepare("INSERT INTO map_spawns (center_x, center_y, center_z, radius) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		return 0, err
 	}
+	defer spawnStmt.Close()
 
-	for _, wp := range gm.Waypoints {
-		wm.Waypoints = append(wm.Waypoints, libotw.Waypoint{
-			Name: wp.Name,
-			X:    wp.X,
-			Y:    wp.Y,
-			Z:    wp.Z,
-		})
+	entryStmt, err := tx.Prepare("INSERT INTO map_spawn_entries (spawn_id, name, offset_x, offset_y, spawntime) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		return 0, err
 	}
+	defer entryStmt.Close()
 
 	for _, s := range spawns {
-		sp := libotw.Spawn{
-			CenterX: s.CenterX,
-			CenterY: s.CenterY,
-			CenterZ: s.CenterZ,
-			Radius:  s.Radius,
+		res, err := spawnStmt.Exec(s.CenterX, s.CenterY, s.CenterZ, s.Radius)
+		if err != nil {
+			return 0, err
 		}
+		spawnID, _ := res.LastInsertId()
 		for _, m := range s.Monsters {
-			sp.Creatures = append(sp.Creatures, libotw.SpawnCreature{
-				Name:      m.Name,
-				OffsetX:   m.X,
-				OffsetY:   m.Y,
-				SpawnTime: m.SpawnTime,
-				Direction: m.Direction,
-			})
+			if _, err := entryStmt.Exec(spawnID, m.Name, m.X, m.Y, m.SpawnTime); err != nil {
+				return 0, err
+			}
 		}
-		wm.Spawns = append(wm.Spawns, sp)
 	}
+
+	return len(spawns), tx.Commit()
+}
+
+func seedHouses(db *sql.DB, houses []xmlHouse) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM map_houses"); err != nil {
+		return 0, err
+	}
+
+	stmt, err := tx.Prepare("INSERT INTO map_houses (id, name, entry_x, entry_y, entry_z, rent, town_id, size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
 
 	for _, h := range houses {
-		wm.Houses = append(wm.Houses, libotw.House{
-			ID:     h.ID,
-			Name:   h.Name,
-			EntryX: h.EntryX,
-			EntryY: h.EntryY,
-			EntryZ: h.EntryZ,
-			Size:   h.Size,
-			Rent:   h.Rent,
-			TownID: h.TownID,
-		})
+		if _, err := stmt.Exec(h.ID, h.Name, h.EntryX, h.EntryY, h.EntryZ, h.Rent, h.TownID, h.Size); err != nil {
+			return 0, err
+		}
 	}
 
-	return wm
+	return len(houses), tx.Commit()
+}
+
+func seedTowns(db *sql.DB, towns []otbm.Town) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM map_towns"); err != nil {
+		return 0, err
+	}
+
+	stmt, err := tx.Prepare("INSERT INTO map_towns (id, name, entry_x, entry_y, entry_z) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+
+	for _, t := range towns {
+		if _, err := stmt.Exec(t.ID, t.Name, t.X, t.Y, t.Z); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(towns), tx.Commit()
+}
+
+func seedWaypoints(db *sql.DB, waypoints []otbm.Waypoint) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM map_waypoints"); err != nil {
+		return 0, err
+	}
+
+	stmt, err := tx.Prepare("INSERT INTO map_waypoints (name, x, y, z) VALUES (?, ?, ?, ?)")
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+
+	for _, w := range waypoints {
+		if _, err := stmt.Exec(w.Name, w.X, w.Y, w.Z); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(waypoints), tx.Commit()
 }
