@@ -8,7 +8,7 @@ go build .
 
 ## Usage
 
-Seeds MariaDB from legacy Tibia file formats (OTB, XML, OTBM).
+Seeds MariaDB from legacy OpenTibia file formats (OTB, XML, OTBM).
 
 ### Items
 

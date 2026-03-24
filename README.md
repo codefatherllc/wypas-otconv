@@ -1,6 +1,6 @@
 # wypas-otconv
 
-Database seeder for Wypas — imports legacy Tibia data files (items.otb, items.xml, Map.otbm, Spawns.xml, Houses.xml) into MariaDB tables.
+Database seeder for Wypas — imports legacy OpenTibia data files (items.otb, items.xml, Map.otbm, Spawns.xml, Houses.xml) into MariaDB tables.
 
 ## Build
 
