@@ -8,7 +8,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/codefatherllc/wypas-lib/gamedata"
-	"github.com/codefatherllc/wypas-lib/otb"
+	"github.com/codefatherllc/wypas-lib/otbm"
 )
 
 func Seed(args []string) error {
@@ -24,15 +24,15 @@ func Seed(args []string) error {
 		return fmt.Errorf("--otbm and --dsn are required")
 	}
 
-	var opts []otb.WorldOption
+	var opts []otbm.WorldOption
 	if *spawnsPath != "" {
-		opts = append(opts, otb.WithSpawns(*spawnsPath))
+		opts = append(opts, otbm.WithSpawns(*spawnsPath))
 	}
 	if *housesPath != "" {
-		opts = append(opts, otb.WithHouses(*housesPath))
+		opts = append(opts, otbm.WithHouses(*housesPath))
 	}
 
-	world, err := otb.LoadWorld(*otbmPath, opts...)
+	world, err := otbm.LoadWorld(*otbmPath, opts...)
 	if err != nil {
 		return fmt.Errorf("load world: %w", err)
 	}
