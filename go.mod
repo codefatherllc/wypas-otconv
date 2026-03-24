@@ -3,7 +3,7 @@ module github.com/codefatherllc/wypas-otconv
 go 1.22.3
 
 require (
-	github.com/codefatherllc/wypas-lib v1.18.0
+	github.com/codefatherllc/wypas-lib v1.19.0
 	github.com/go-sql-driver/mysql v1.8.1
 )
 
