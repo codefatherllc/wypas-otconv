@@ -1,6 +1,6 @@
 filippo.io/edwards25519 v1.1.0 h1:FNf4tywRC1HmFuKW5xopWpigGjJKiJSV0Cqo0cJWDaA=
 filippo.io/edwards25519 v1.1.0/go.mod h1:BxyFTGdWcka3PhytdK4V28tE5sGfRvvvRV7EaN4VDT4=
-github.com/codefatherllc/wypas-lib v1.23.1 h1:6fNJK3GAVt0KAYLLFIMjnTOtufIuNDKqPNC1O3Zg0/w=
-github.com/codefatherllc/wypas-lib v1.23.1/go.mod h1:y2GpW1htsmmZL54vIhnxyrqCKmTGcMrJFknefDCQao8=
+github.com/codefatherllc/wypas-lib v1.24.0 h1:Xme4/VwOpYU2SLDpYzFI2tgSmU7NcAFTRF6dPyFQXhk=
+github.com/codefatherllc/wypas-lib v1.24.0/go.mod h1:y2GpW1htsmmZL54vIhnxyrqCKmTGcMrJFknefDCQao8=
 github.com/go-sql-driver/mysql v1.8.1 h1:LedoTUt/eveggdHS9qUFC1EFSa8bU2+1pZjSRpvNJ1Y=
 github.com/go-sql-driver/mysql v1.8.1/go.mod h1:wEBSXgmK//2ZFJyE+qWnIsVGmvmEKlqwuVSjsCm7DZg=
