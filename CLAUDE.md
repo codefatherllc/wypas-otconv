@@ -33,7 +33,7 @@ Parses OTBM + XMLs via `wypas-lib/otb`, inserts into `map_tiles`, `map_spawns`, 
 
 ## Release
 
-Cross-compiled for 5 targets via GitHub Actions (`release.yml` on `v*` tags).
+Cross-compiled for 3 platforms (darwin/arm64, linux/arm64, linux/amd64) via GitHub Actions (`release.yml` on `v*` tags). Binaries + checksums published as GitHub Releases.
 
 ## License
 
@@ -41,4 +41,5 @@ GPL-2.0
 
 ## CI
 
-`.github/workflows/build.yml` on `main`, `.github/workflows/release.yml` on `v*` tags.
+- `.github/workflows/build.yml` — `main`, PRs, `workflow_dispatch`
+- `.github/workflows/release.yml` — `v*` tags, `workflow_dispatch`

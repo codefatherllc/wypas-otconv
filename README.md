@@ -18,6 +18,15 @@ otconv items seed --otb items.otb --xml items.xml --dsn "user:pass@tcp(host:3306
 otconv map seed --otbm Map.otbm --spawns Spawns.xml --houses Houses.xml --dsn "user:pass@tcp(host:3306)/dbname"
 ```
 
+## Release
+
+Pre-built binaries for darwin/arm64, linux/arm64, and linux/amd64 are available on the [GitHub Releases](https://github.com/codefatherllc/wypas-otconv/releases) page. Push a `v*` tag to trigger a release build.
+
+## CI
+
+- `.github/workflows/build.yml` — build + test on `main`, PRs, manual dispatch
+- `.github/workflows/release.yml` — cross-compile + publish on `v*` tags
+
 ## License
 
 GPL-2.0
