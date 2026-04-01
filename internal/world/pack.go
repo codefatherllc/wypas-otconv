@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
@@ -42,6 +43,9 @@ func Seed(args []string) error {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := db.Ping(); err != nil {
 		return fmt.Errorf("ping db: %w", err)
@@ -78,21 +82,35 @@ func Seed(args []string) error {
 }
 
 func seedTiles(db *sql.DB, tiles []gamedata.MapTile) (int, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec("DELETE FROM map_tiles"); err != nil {
+	if _, err := db.Exec("DELETE FROM map_tiles"); err != nil {
 		return 0, err
 	}
 
-	if err := gamedata.BulkInsertTiles(tx, tiles); err != nil {
-		return 0, err
+	const chunkSize = 10000
+	for i := 0; i < len(tiles); i += chunkSize {
+		end := i + chunkSize
+		if end > len(tiles) {
+			end = len(tiles)
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			return 0, fmt.Errorf("begin chunk %d: %w", i/chunkSize, err)
+		}
+
+		if err := gamedata.BulkInsertTiles(tx, tiles[i:end]); err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("insert chunk %d: %w", i/chunkSize, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return 0, fmt.Errorf("commit chunk %d: %w", i/chunkSize, err)
+		}
+
+		fmt.Printf("  tiles: %d / %d\n", end, len(tiles))
 	}
 
-	return len(tiles), tx.Commit()
+	return len(tiles), nil
 }
 
 func seedSpawns(db *sql.DB, spawns []gamedata.Spawn) (int, error) {
