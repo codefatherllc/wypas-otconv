@@ -53,5 +53,9 @@ func main() {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
   otconv items seed --otb FILE --xml FILE --dsn DSN
-  otconv map   seed --otbm FILE [--spawns FILE] [--houses FILE] --dsn DSN`)
+  otconv map   seed --otbm FILE [--spawns FILE] [--houses FILE] --dsn DSN
+
+Tables (v2 schema):
+  items seed  → item_types
+  map seed    → map, items, spawns, spawn, houses, towns, waypoints`)
 }
