@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -45,8 +48,12 @@ func Seed(args []string) error {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(5)
-	db.SetMaxIdleConns(2)
+	workers := runtime.NumCPU()
+	if workers < 4 {
+		workers = 4
+	}
+	db.SetMaxOpenConns(workers + 2)
+	db.SetMaxIdleConns(workers)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := db.Ping(); err != nil {
@@ -152,41 +159,110 @@ func richItemAttrs(ri *gamedata.RichItem) *string {
 }
 
 func seedTiles(db *sql.DB, tiles []gamedata.MapTile) (int, int, error) {
-	if _, err := db.Exec("DELETE FROM `items` WHERE owner_type IN ('map', 'container')"); err != nil {
-		return 0, 0, fmt.Errorf("clear map/container items: %w", err)
+	// Ensure map_items table exists.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS map_items (
+		id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+		type_id    SMALLINT UNSIGNED NOT NULL,
+		count      TINYINT UNSIGNED NOT NULL DEFAULT 1,
+		owner_id   BIGINT UNSIGNED NOT NULL,
+		slot       SMALLINT NOT NULL DEFAULT 0,
+		parent_id  BIGINT UNSIGNED DEFAULT NULL,
+		attributes TEXT DEFAULT NULL
+	)`); err != nil {
+		return 0, 0, fmt.Errorf("create map_items table: %w", err)
+	}
+
+	if _, err := db.Exec("DELETE FROM `map_items`"); err != nil {
+		return 0, 0, fmt.Errorf("clear map_items: %w", err)
+	}
+	if _, err := db.Exec("DELETE FROM `items` WHERE owner_type IN ('map', 'world')"); err != nil {
+		return 0, 0, fmt.Errorf("clear map/world items: %w", err)
 	}
 	if _, err := db.Exec("DELETE FROM `map`"); err != nil {
 		return 0, 0, fmt.Errorf("clear map: %w", err)
 	}
 
-	totalItems := 0
-	const chunkSize = 10000
-	for i := 0; i < len(tiles); i += chunkSize {
-		end := i + chunkSize
-		if end > len(tiles) {
-			end = len(tiles)
-		}
-
-		tx, err := db.Begin()
-		if err != nil {
-			return 0, 0, fmt.Errorf("begin chunk %d: %w", i/chunkSize, err)
-		}
-
-		n, err := insertTileChunk(tx, tiles[i:end])
-		if err != nil {
-			tx.Rollback()
-			return 0, 0, fmt.Errorf("insert chunk %d: %w", i/chunkSize, err)
-		}
-		totalItems += n
-
-		if err := tx.Commit(); err != nil {
-			return 0, 0, fmt.Errorf("commit chunk %d: %w", i/chunkSize, err)
-		}
-
-		fmt.Printf("  tiles: %d / %d (%d items)\n", end, len(tiles), totalItems)
+	// Group tiles by floor (z-level).
+	floors := make(map[uint8][]gamedata.MapTile)
+	for _, t := range tiles {
+		floors[t.Z] = append(floors[t.Z], t)
 	}
 
-	return len(tiles), totalItems, nil
+	const chunkSize = 10000
+
+	workers := runtime.NumCPU()
+	if workers < 4 {
+		workers = 4
+	}
+
+	var totalItems atomic.Int64
+	var done atomic.Int64
+	var firstErr error
+	var errOnce sync.Once
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+
+	// Count total chunks across all floors for progress reporting.
+	totalChunks := 0
+	for _, floorTiles := range floors {
+		totalChunks += (len(floorTiles) + chunkSize - 1) / chunkSize
+	}
+
+	// Launch one goroutine per floor level (z=0..15).
+	for z := uint8(0); z <= 15; z++ {
+		floorTiles, ok := floors[z]
+		if !ok || len(floorTiles) == 0 {
+			continue
+		}
+
+		// Within each floor, batch tiles into chunks.
+		for i := 0; i < len(floorTiles); i += chunkSize {
+			end := i + chunkSize
+			if end > len(floorTiles) {
+				end = len(floorTiles)
+			}
+			chunkTiles := floorTiles[i:end]
+			chunkIdx := int(z)*1000 + i/chunkSize // unique label per chunk
+
+			sem <- struct{}{} // acquire worker slot
+			wg.Add(1)
+			go func(ci int, batch []gamedata.MapTile) {
+				defer wg.Done()
+				defer func() { <-sem }() // release worker slot
+
+				tx, err := db.Begin()
+				if err != nil {
+					errOnce.Do(func() { firstErr = fmt.Errorf("begin chunk %d: %w", ci, err) })
+					return
+				}
+
+				n, err := insertTileChunk(tx, batch)
+				if err != nil {
+					tx.Rollback()
+					errOnce.Do(func() { firstErr = fmt.Errorf("insert chunk %d: %w", ci, err) })
+					return
+				}
+
+				if err := tx.Commit(); err != nil {
+					errOnce.Do(func() { firstErr = fmt.Errorf("commit chunk %d: %w", ci, err) })
+					return
+				}
+
+				totalItems.Add(int64(n))
+				d := done.Add(1)
+				fmt.Printf("  tiles: %d / %d chunks\n", d, totalChunks)
+			}(chunkIdx, chunkTiles)
+		}
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return 0, 0, firstErr
+	}
+
+	return len(tiles), int(totalItems.Load()), nil
 }
 
 // insertTileChunk inserts tiles into the `map` table and their items into the `items` table.
@@ -240,16 +316,16 @@ func bulkInsertMapTiles(tx *sql.Tx, tiles []gamedata.MapTile) error {
 
 func bulkInsertTileItems(tx *sql.Tx, tiles []gamedata.MapTile) (int, error) {
 	stmt, err := tx.Prepare(
-		"INSERT INTO `items` (type_id, count, owner_type, owner_id, slot, attributes) " +
-			"VALUES (?, ?, 'map', ?, ?, ?)")
+		"INSERT INTO `map_items` (type_id, count, owner_id, slot, attributes) " +
+			"VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
 		return 0, err
 	}
 	defer stmt.Close()
 
 	containerStmt, err := tx.Prepare(
-		"INSERT INTO `items` (type_id, count, owner_type, owner_id, slot, attributes) " +
-			"VALUES (?, ?, 'container', ?, ?, ?)")
+		"INSERT INTO `map_items` (type_id, count, owner_id, slot, parent_id, attributes) " +
+			"VALUES (?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return 0, err
 	}
@@ -282,7 +358,7 @@ func bulkInsertTileItems(tx *sql.Tx, tiles []gamedata.MapTile) (int, error) {
 					if sc == 0 {
 						sc = 1
 					}
-					if _, err := containerStmt.Exec(sub.ServerID, sc, parentID, 100+subSlot, subAttrs); err != nil {
+					if _, err := containerStmt.Exec(sub.ServerID, sc, ownerID, 100+subSlot, parentID, subAttrs); err != nil {
 						return 0, fmt.Errorf("insert sub-item at (%d,%d,%d) parent %d slot %d: %w",
 							t.X, t.Y, t.Z, parentID, subSlot, err)
 					}

@@ -27,7 +27,7 @@ otconv map seed --otbm Map.otbm --spawns Spawns.xml --houses Houses.xml --dsn "u
 
 Parses OTBM + XMLs via `wypas-lib/otbm`, inserts into:
 - `map` — tile data (x, y, z, ground_id, flags, house_id)
-- `items` — unified items table (each tile item as a row with `owner_type='map'`, `owner_id=PackPos(x,y,z)`, attributes as JSON)
+- `map_items` — immutable map item template table (each tile item as a row with `owner_id=PackPos(x,y,z)`, attributes as JSON); the game copies this to `items` on startup with REFRESH_MAP=1
 - `spawns` + `spawn` — spawn point areas and individual creature entries
 - `houses` — house definitions
 - `towns` — town entry points
@@ -35,10 +35,10 @@ Parses OTBM + XMLs via `wypas-lib/otbm`, inserts into:
 
 ## v2 Schema Changes (from v1)
 
-- `map_tiles` → `map` (renamed, items blob removed — items live in unified `items` table)
+- `map_tiles` → `map` (renamed, items blob removed — items live in `map_items` table)
 - `map_spawns` → `spawns`, `map_spawn_entries` → `spawn` (renamed, spawn.type is ENUM)
 - `map_towns` → `towns`, `map_waypoints` → `waypoints`, `map_houses` → `houses` (renamed)
-- NEW: `items` table — each tile item gets its own row with JSON attributes (action_id, unique_id, tele_dest, door_id, depot_id, text, charges, etc.)
+- NEW: `map_items` table — immutable template of tile items with JSON attributes (action_id, unique_id, tele_dest, door_id, depot_id, text, charges, etc.); the game copies this to `items` on startup with REFRESH_MAP=1
 
 ## Dependencies
 
