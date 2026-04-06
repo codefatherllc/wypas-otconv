@@ -72,7 +72,7 @@ func TestSeedTiles(t *testing.T) {
 				{
 					ServerID: 1988, Count: 1,
 					SubItems: []gamedata.RichItem{
-						{ServerID: 2160, Count: 50}, // gold
+						{ServerID: 2160, Count: 50},              // gold
 						{ServerID: 2152, Count: 3, Charges: 100}, // rune
 					},
 				},
@@ -88,12 +88,12 @@ func TestSeedTiles(t *testing.T) {
 	if tileCount != 4 {
 		t.Errorf("expected 4 tiles, got %d", tileCount)
 	}
-	// 5 top-level items (2+1+1+1) + 2 sub-items = 7
-	if itemCount != 7 {
-		t.Errorf("expected 7 items, got %d", itemCount)
+	// 4 ground items (slot=0) + 5 top-level items (2+1+1+1 at slot=1+) + 2 sub-items = 11
+	if itemCount != 11 {
+		t.Errorf("expected 11 items, got %d", itemCount)
 	}
 
-	// Verify map table
+	// Verify map table (packed pos PK)
 	var mapCount int
 	if err := db.QueryRow("SELECT COUNT(*) FROM `map`").Scan(&mapCount); err != nil {
 		t.Fatalf("count map: %v", err)
@@ -102,27 +102,37 @@ func TestSeedTiles(t *testing.T) {
 		t.Errorf("expected 4 map rows, got %d", mapCount)
 	}
 
-	// Verify items table
-	var totalItems int
-	if err := db.QueryRow("SELECT COUNT(*) FROM `items` WHERE owner_type = 'map'").Scan(&totalItems); err != nil {
-		t.Fatalf("count map items: %v", err)
+	// Verify map_items table (template items including ground at slot=0)
+	var totalMapItems int
+	if err := db.QueryRow("SELECT COUNT(*) FROM `map_items`").Scan(&totalMapItems); err != nil {
+		t.Fatalf("count map_items: %v", err)
 	}
-	if totalItems != 5 {
-		t.Errorf("expected 5 map-owned items, got %d", totalItems)
+	if totalMapItems != 11 {
+		t.Errorf("expected 11 map_items rows, got %d", totalMapItems)
 	}
 
-	var containerItems int
-	if err := db.QueryRow("SELECT COUNT(*) FROM `items` WHERE owner_type = 'container'").Scan(&containerItems); err != nil {
-		t.Fatalf("count container items: %v", err)
+	// Verify ground items (slot=0)
+	var groundCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM `map_items` WHERE slot = 0").Scan(&groundCount); err != nil {
+		t.Fatalf("count ground items: %v", err)
 	}
-	if containerItems != 2 {
-		t.Errorf("expected 2 container items, got %d", containerItems)
+	if groundCount != 4 {
+		t.Errorf("expected 4 ground items (slot=0), got %d", groundCount)
+	}
+
+	// Verify sub-items (parent_id IS NOT NULL)
+	var subItemCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM `map_items` WHERE parent_id IS NOT NULL").Scan(&subItemCount); err != nil {
+		t.Fatalf("count sub-items: %v", err)
+	}
+	if subItemCount != 2 {
+		t.Errorf("expected 2 sub-items, got %d", subItemCount)
 	}
 
 	// Verify teleport attributes
-	teleOwnerID := packPos(101, 200, 7)
+	telePos := packPos(101, 200, 7)
 	var attrs sql.NullString
-	if err := db.QueryRow("SELECT attributes FROM `items` WHERE owner_type = 'map' AND owner_id = ?", teleOwnerID).Scan(&attrs); err != nil {
+	if err := db.QueryRow("SELECT attributes FROM `map_items` WHERE tile_pos = ? AND slot = 1", telePos).Scan(&attrs); err != nil {
 		t.Fatalf("query tele item: %v", err)
 	}
 	if !attrs.Valid {
@@ -141,8 +151,8 @@ func TestSeedTiles(t *testing.T) {
 	}
 
 	// Verify door item with text attribute
-	doorOwnerID := packPos(102, 200, 7)
-	if err := db.QueryRow("SELECT attributes FROM `items` WHERE owner_type = 'map' AND owner_id = ?", doorOwnerID).Scan(&attrs); err != nil {
+	doorPos := packPos(102, 200, 7)
+	if err := db.QueryRow("SELECT attributes FROM `map_items` WHERE tile_pos = ? AND slot = 1", doorPos).Scan(&attrs); err != nil {
 		t.Fatalf("query door item: %v", err)
 	}
 	if err := json.Unmarshal([]byte(attrs.String), &m); err != nil {
@@ -155,7 +165,17 @@ func TestSeedTiles(t *testing.T) {
 		t.Errorf("wrong text: %v", m["text"])
 	}
 
-	fmt.Printf("PASS: %d tiles, %d items (5 map + 2 container)\n", tileCount, itemCount)
+	// Verify packed position encoding
+	expectedPos := uint64(100)<<20 | uint64(200)<<4 | uint64(7)
+	var posVal uint64
+	if err := db.QueryRow("SELECT pos FROM `map` LIMIT 1").Scan(&posVal); err != nil {
+		t.Fatalf("query pos: %v", err)
+	}
+	if posVal != expectedPos {
+		t.Errorf("expected packed pos %d, got %d", expectedPos, posVal)
+	}
+
+	fmt.Printf("PASS: %d tiles, %d items (4 ground + 5 items + 2 sub-items)\n", tileCount, itemCount)
 }
 
 func TestSeedSpawns(t *testing.T) {
@@ -204,7 +224,6 @@ func TestSeedSpawns(t *testing.T) {
 		t.Errorf("expected 3 spawn entries, got %d", entryCount)
 	}
 
-	// Verify NPC type
 	var spawnType string
 	db.QueryRow("SELECT type FROM `spawn` WHERE name = 'Anworb'").Scan(&spawnType)
 	if spawnType != "npc" {
@@ -263,8 +282,8 @@ func TestSeedTowns(t *testing.T) {
 	}
 
 	towns := []gamedata.Town{
-		{ID: 1, Name: "Thais", EntryX: 32369, EntryY: 32241, EntryZ: 7},
-		{ID: 2, Name: "Carlin", EntryX: 32360, EntryY: 31782, EntryZ: 7},
+		{ID: 1, Name: "Thais", X: 32369, Y: 32241, Z: 7},
+		{ID: 2, Name: "Carlin", X: 32360, Y: 31782, Z: 7},
 	}
 
 	count, err := seedTowns(db, towns)

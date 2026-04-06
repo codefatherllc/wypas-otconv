@@ -26,19 +26,19 @@ otconv map seed --otbm Map.otbm --spawns Spawns.xml --houses Houses.xml --dsn "u
 ```
 
 Parses OTBM + XMLs via `wypas-lib/otbm`, inserts into:
-- `map` — tile data (x, y, z, ground_id, flags, house_id)
-- `map_items` — immutable map item template table (each tile item as a row with `owner_id=PackPos(x,y,z)`, attributes as JSON); the game copies this to `items` on startup with REFRESH_MAP=1
+- `map` — tile structure (packed pos PK `(x<<20)|(y<<4)|z`, flags, house_id). No ground_id.
+- `map_items` — immutable template items (tile_pos FK, slot=0 is ground, slot=1+ are items in stackpos order, JSON attributes)
 - `spawns` + `spawn` — spawn point areas and individual creature entries
 - `houses` — house definitions
 - `towns` — town entry points
 - `waypoints` — named teleport waypoints
 
-## v2 Schema Changes (from v1)
+## v2 Schema
 
-- `map_tiles` → `map` (renamed, items blob removed — items live in `map_items` table)
-- `map_spawns` → `spawns`, `map_spawn_entries` → `spawn` (renamed, spawn.type is ENUM)
-- `map_towns` → `towns`, `map_waypoints` → `waypoints`, `map_houses` → `houses` (renamed)
-- NEW: `map_items` table — immutable template of tile items with JSON attributes (action_id, unique_id, tele_dest, door_id, depot_id, text, charges, etc.); the game copies this to `items` on startup with REFRESH_MAP=1
+- `map`: packed `pos` BIGINT PK `(x<<20)|(y<<4)|z`, `flags`, `house_id`. No ground_id column.
+- `map_items`: `tile_pos` FK to map.pos, `slot=0` = ground item, `slot=1+` = stackpos. Immutable at runtime.
+- `items`: game runtime state. `parent_type` ENUM('world','player','container','depot','market') + `parent_id`.
+- Position packing: `(x<<20)|(y<<4)|z` — z: 4 bits, y: 16 bits, x: 16 bits.
 
 ## Dependencies
 

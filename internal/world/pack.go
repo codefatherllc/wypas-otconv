@@ -90,9 +90,10 @@ func Seed(args []string) error {
 	return nil
 }
 
-// packPos encodes a tile position into a single uint64 for use as owner_id.
+// packPos encodes a tile position into a single uint64.
+// Layout: x (bits 20-35), y (bits 4-19), z (bits 0-3). 36 bits in BIGINT.
 func packPos(x, y uint16, z uint8) uint64 {
-	return uint64(x)<<24 | uint64(y)<<8 | uint64(z)
+	return uint64(x)<<20 | uint64(y)<<4 | uint64(z&0x0F)
 }
 
 // richItemAttrs builds a JSON attribute map from a RichItem, omitting zero/empty values.
@@ -159,24 +160,10 @@ func richItemAttrs(ri *gamedata.RichItem) *string {
 }
 
 func seedTiles(db *sql.DB, tiles []gamedata.MapTile) (int, int, error) {
-	// Ensure map_items table exists.
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS map_items (
-		id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-		type_id    SMALLINT UNSIGNED NOT NULL,
-		count      TINYINT UNSIGNED NOT NULL DEFAULT 1,
-		owner_id   BIGINT UNSIGNED NOT NULL,
-		slot       SMALLINT NOT NULL DEFAULT 0,
-		parent_id  BIGINT UNSIGNED DEFAULT NULL,
-		attributes TEXT DEFAULT NULL
-	)`); err != nil {
-		return 0, 0, fmt.Errorf("create map_items table: %w", err)
-	}
-
+	// map_items table is created by migrations-v2, no need to create here.
+	// otconv only touches map + map_items, never items (game domain).
 	if _, err := db.Exec("DELETE FROM `map_items`"); err != nil {
 		return 0, 0, fmt.Errorf("clear map_items: %w", err)
-	}
-	if _, err := db.Exec("DELETE FROM `items` WHERE owner_type IN ('map', 'world')"); err != nil {
-		return 0, 0, fmt.Errorf("clear map/world items: %w", err)
 	}
 	if _, err := db.Exec("DELETE FROM `map`"); err != nil {
 		return 0, 0, fmt.Errorf("clear map: %w", err)
@@ -271,6 +258,10 @@ func insertTileChunk(tx *sql.Tx, tiles []gamedata.MapTile) (int, error) {
 		return 0, nil
 	}
 
+	if _, err := tx.Exec("SET FOREIGN_KEY_CHECKS=0, UNIQUE_CHECKS=0"); err != nil {
+		return 0, err
+	}
+
 	if err := bulkInsertMapTiles(tx, tiles); err != nil {
 		return 0, err
 	}
@@ -293,19 +284,18 @@ func bulkInsertMapTiles(tx *sql.Tx, tiles []gamedata.MapTile) error {
 		batch := tiles[i:end]
 
 		rows := make([]string, len(batch))
-		args := make([]interface{}, 0, len(batch)*6)
+		args := make([]interface{}, 0, len(batch)*3)
 		for j := range batch {
-			rows[j] = "(?,?,?,?,?,?)"
+			rows[j] = "(?,?,?)"
 			args = append(args,
-				batch[j].X, batch[j].Y, batch[j].Z,
-				batch[j].GroundID, batch[j].Flags, batch[j].HouseID,
+				packPos(batch[j].X, batch[j].Y, batch[j].Z),
+				batch[j].Flags, batch[j].HouseID,
 			)
 		}
 
-		q := "INSERT INTO `map` (x, y, z, ground_id, flags, house_id) VALUES " +
+		q := "INSERT INTO `map` (pos, flags, house_id) VALUES " +
 			strings.Join(rows, ",") +
-			" ON DUPLICATE KEY UPDATE ground_id=VALUES(ground_id), flags=VALUES(flags), " +
-			"house_id=VALUES(house_id)"
+			" ON DUPLICATE KEY UPDATE flags=VALUES(flags), house_id=VALUES(house_id)"
 
 		if _, err := tx.Exec(q, args...); err != nil {
 			return err
@@ -315,55 +305,132 @@ func bulkInsertMapTiles(tx *sql.Tx, tiles []gamedata.MapTile) error {
 }
 
 func bulkInsertTileItems(tx *sql.Tx, tiles []gamedata.MapTile) (int, error) {
-	stmt, err := tx.Prepare(
-		"INSERT INTO `map_items` (type_id, count, owner_id, slot, attributes) " +
-			"VALUES (?, ?, ?, ?, ?)")
-	if err != nil {
-		return 0, err
-	}
-	defer stmt.Close()
+	const batchSize = 500
 
-	containerStmt, err := tx.Prepare(
-		"INSERT INTO `map_items` (type_id, count, owner_id, slot, parent_id, attributes) " +
-			"VALUES (?, ?, ?, ?, ?, ?)")
-	if err != nil {
-		return 0, err
+	// Pre-collect flat items (no SubItems) for multi-row INSERT.
+	type flatItem struct {
+		tilePos uint64
+		typeID  uint16
+		count   uint8
+		slot    int
+		attrs   *string
 	}
-	defer containerStmt.Close()
+	// Pre-collect container parents to insert sequentially (need LastInsertId).
+	type containerItem struct {
+		tilePos uint64
+		ri      *gamedata.RichItem
+		slot    int
+		tileX   uint16
+		tileY   uint16
+		tileZ   uint8
+	}
 
-	count := 0
+	flat := make([]flatItem, 0, len(tiles)*3)
+	var containers []containerItem
+
 	for i := range tiles {
 		t := &tiles[i]
-		ownerID := packPos(t.X, t.Y, t.Z)
+		tilePos := packPos(t.X, t.Y, t.Z)
 
-		for slot, ri := range t.RichItems {
-			attrs := richItemAttrs(&ri)
+		if t.GroundID != 0 {
+			flat = append(flat, flatItem{tilePos, t.GroundID, 1, 0, nil})
+		}
+
+		for j := range t.RichItems {
+			ri := &t.RichItems[j]
+			slot := j + 1
 			c := ri.Count
 			if c == 0 {
 				c = 1
 			}
+			if len(ri.SubItems) > 0 {
+				containers = append(containers, containerItem{tilePos, ri, slot, t.X, t.Y, t.Z})
+			} else {
+				attrs := richItemAttrs(ri)
+				flat = append(flat, flatItem{tilePos, ri.ServerID, c, slot, attrs})
+			}
+		}
+	}
 
-			res, err := stmt.Exec(ri.ServerID, c, ownerID, slot, attrs)
+	count := 0
+
+	// Pass 1: bulk insert all flat items.
+	for i := 0; i < len(flat); i += batchSize {
+		end := i + batchSize
+		if end > len(flat) {
+			end = len(flat)
+		}
+		batch := flat[i:end]
+
+		rows := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)*5)
+		for j := range batch {
+			rows[j] = "(?,?,?,?,?)"
+			args = append(args,
+				batch[j].tilePos, batch[j].typeID,
+				batch[j].count, batch[j].slot, batch[j].attrs,
+			)
+		}
+
+		q := "INSERT INTO `map_items` (tile_pos, type_id, count, slot, attributes) VALUES " +
+			strings.Join(rows, ",")
+
+		if _, err := tx.Exec(q, args...); err != nil {
+			return 0, err
+		}
+		count += len(batch)
+	}
+
+	// Pass 2: containers — insert parent (need LastInsertId), then batch children.
+	if len(containers) > 0 {
+		parentStmt, err := tx.Prepare(
+			"INSERT INTO `map_items` (tile_pos, type_id, count, slot, attributes) VALUES (?,?,?,?,?)")
+		if err != nil {
+			return 0, err
+		}
+		defer parentStmt.Close()
+
+		for _, ci := range containers {
+			attrs := richItemAttrs(ci.ri)
+			c := ci.ri.Count
+			if c == 0 {
+				c = 1
+			}
+
+			res, err := parentStmt.Exec(ci.tilePos, ci.ri.ServerID, c, ci.slot, attrs)
 			if err != nil {
-				return 0, fmt.Errorf("insert item at (%d,%d,%d) slot %d: %w", t.X, t.Y, t.Z, slot, err)
+				return 0, fmt.Errorf("insert container at (%d,%d,%d) slot %d: %w",
+					ci.tileX, ci.tileY, ci.tileZ, ci.slot, err)
 			}
 			count++
 
-			// Handle sub-items (items inside containers on the tile)
-			if len(ri.SubItems) > 0 {
-				parentID, _ := res.LastInsertId()
-				for subSlot, sub := range ri.SubItems {
-					subAttrs := richItemAttrs(&sub)
-					sc := sub.Count
+			parentID, _ := res.LastInsertId()
+			subs := ci.ri.SubItems
+
+			// Batch all sub-items of this container in one multi-row INSERT.
+			if len(subs) > 0 {
+				rows := make([]string, len(subs))
+				args := make([]interface{}, 0, len(subs)*6)
+				for s := range subs {
+					rows[s] = "(?,?,?,?,?,?)"
+					sc := subs[s].Count
 					if sc == 0 {
 						sc = 1
 					}
-					if _, err := containerStmt.Exec(sub.ServerID, sc, ownerID, 100+subSlot, parentID, subAttrs); err != nil {
-						return 0, fmt.Errorf("insert sub-item at (%d,%d,%d) parent %d slot %d: %w",
-							t.X, t.Y, t.Z, parentID, subSlot, err)
-					}
-					count++
+					subAttrs := richItemAttrs(&subs[s])
+					args = append(args,
+						ci.tilePos, subs[s].ServerID, sc, s, parentID, subAttrs,
+					)
 				}
+
+				q := "INSERT INTO `map_items` (tile_pos, type_id, count, slot, parent_id, attributes) VALUES " +
+					strings.Join(rows, ",")
+
+				if _, err := tx.Exec(q, args...); err != nil {
+					return 0, fmt.Errorf("insert sub-items at (%d,%d,%d) parent %d: %w",
+						ci.tileX, ci.tileY, ci.tileZ, parentID, err)
+				}
+				count += len(subs)
 			}
 		}
 	}
